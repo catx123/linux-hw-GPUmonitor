@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Real-time Hardware Telemetry & Fan Speed Monitor (v5.0)
+Real-time Hardware Telemetry & Fan Speed Monitor (v5.1)
 Supports AMD, NVIDIA (via nvidia-smi), Intel iGPUs, and Custom Manual Sensors.
+(Updated: Added Min/Max/Avg session stats for Edge and Memory temperatures)
 """
 
 # --------------------------------------------------------------------------- #
@@ -91,10 +92,8 @@ def clock_to_mhz(v: Optional[float]) -> Optional[float]:
 # Sparkline Helper
 # --------------------------------------------------------------------------- #
 def get_sparkline(data: List[float], width: int = 20) -> str:
-    """Generate an ASCII sparkline string from a list of values."""
     if not data:
         return " " * width
-    
     if len(data) > width:
         step = len(data) / width
         sampled = [data[int(i * step)] for i in range(width)]
@@ -111,7 +110,6 @@ def get_sparkline(data: List[float], width: int = 20) -> str:
         idx = int(((val - min_val) / range_val) * (len(ASCII_BLOCKS) - 1))
         idx = max(0, min(len(ASCII_BLOCKS) - 1, idx))
         spark += ASCII_BLOCKS[idx]
-    
     return spark
 
 # --------------------------------------------------------------------------- #
@@ -140,9 +138,7 @@ def load_config() -> Dict[str, Any]:
             s = json.load(f)
         if isinstance(s, dict):
             interval = float(s.get("update_interval", DEFAULT_UPDATE_INTERVAL))
-            cfg["update_interval"] = max(
-                MIN_UPDATE_INTERVAL, min(MAX_UPDATE_INTERVAL, interval)
-            )
+            cfg["update_interval"] = max(MIN_UPDATE_INTERVAL, min(MAX_UPDATE_INTERVAL, interval))
             cfg["logging_enabled"] = bool(s.get("logging_enabled", True))
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         pass
@@ -151,12 +147,7 @@ def load_config() -> Dict[str, Any]:
 def save_config(interval: float, logging: bool) -> bool:
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                {"update_interval": interval, "logging_enabled": logging},
-                f,
-                indent=4,
-                sort_keys=True,
-            )
+            json.dump({"update_interval": interval, "logging_enabled": logging}, f, indent=4, sort_keys=True)
         return True
     except OSError:
         return False
@@ -302,7 +293,6 @@ def find_hardware() -> Dict[str, Any]:
 # NVIDIA Auto-Detection (via nvidia-smi)
 # --------------------------------------------------------------------------- #
 def poll_nvidia_gpus() -> List[Dict[str, Any]]:
-    """Polls NVIDIA GPUs using nvidia-smi CLI."""
     nvidia_gpus = []
     try:
         cmd = [
@@ -322,17 +312,17 @@ def poll_nvidia_gpus() -> List[Dict[str, Any]]:
             idx, name, temp_gpu, temp_mem, power, util, fan, mem_tot, mem_used = parts
             try:
                 nvidia_gpus.append({
-                    "id": int(idx) + 100, # Offset ID to avoid conflict
+                    "id": int(idx) + 100,
                     "name": f"NVIDIA {name}",
                     "util": float(util),
                     "temp_edge": float(temp_gpu),
-                    "temp_junction": None, # nvidia-smi doesn't easily expose this
+                    "temp_junction": None,
                     "temp_mem": float(temp_mem) if temp_mem != '[N/A]' else None,
                     "freq": 0.0, 
                     "mem_clock": 0.0,
                     "voltage": 0.0,
                     "power": float(power),
-                    "tdp_cap": float(power) * 1.2, # Estimate TDP cap
+                    "tdp_cap": float(power) * 1.2,
                     "fan_rpm": int(float(fan) * 10) if fan != '[N/A]' else 0,
                     "vram": {"total_mb": float(mem_tot), "used_mb": float(mem_used), "free_mb": float(mem_tot) - float(mem_used)},
                     "type": "nvidia"
@@ -352,7 +342,7 @@ def poll_intel_gpus(intel_gpus_list: List[Dict]) -> List[Dict[str, Any]]:
         freq = read_float(freq_path)
         
         stats.append({
-            "id": gpu["id"] + 200, # Offset ID
+            "id": gpu["id"] + 200,
             "name": gpu["name"],
             "util": 0.0, 
             "temp_edge": None, 
@@ -392,7 +382,6 @@ def gpu_power_cap(hw_path: str) -> Optional[float]:
     return None if v is None or v <= 0 else v / 1_000_000.0
 
 def gpu_temps(hw_path: str) -> Dict[str, Optional[float]]:
-    """Reads edge, junction, and mem temperatures dynamically by label."""
     temps = {"edge": None, "junction": None, "mem": None}
     for i in range(1, 5):
         label_path = os.path.join(hw_path, f"temp{i}_label")
@@ -403,12 +392,9 @@ def gpu_temps(hw_path: str) -> Dict[str, Optional[float]]:
             temp_c = val / 1000.0
             if label:
                 lbl = label.strip().lower()
-                if "edge" in lbl:
-                    temps["edge"] = temp_c
-                elif "junction" in lbl or "hotspot" in lbl:
-                    temps["junction"] = temp_c
-                elif "mem" in lbl or "vram" in lbl:
-                    temps["mem"] = temp_c
+                if "edge" in lbl: temps["edge"] = temp_c
+                elif "junction" in lbl or "hotspot" in lbl: temps["junction"] = temp_c
+                elif "mem" in lbl or "vram" in lbl: temps["mem"] = temp_c
             else:
                 if i == 1: temps["edge"] = temp_c
                 elif i == 2: temps["junction"] = temp_c
@@ -458,7 +444,7 @@ def cpu_util_counters() -> Tuple[float, float]:
     return work, total
 
 # --------------------------------------------------------------------------- #
-# CPU power – RAPL‑based wattage (FIXED NEGATIVE BUG)
+# CPU power – RAPL‑based wattage
 # --------------------------------------------------------------------------- #
 def cpu_power(
     hw: Dict[str, Any],
@@ -669,12 +655,16 @@ def upd_all_hist(hist: Dict[str, Dict[str, Any]], stats: Dict[str, Any]):
         upd_hist(hist, "cpu_temp", cpu.get("temp"))
         upd_hist(hist, "cpu_freq", cpu.get("freq"))
     for g in stats.get("gpus", []):
-        upd_hist(hist, f"gpu_{g['id']}_power", g.get("power"))
-        upd_hist(hist, f"gpu_{g['id']}_temp_junction", g.get("temp_junction"))
-        upd_hist(hist, f"gpu_{g['id']}_voltage", g.get("voltage"))
-        upd_hist(hist, f"gpu_{g['id']}_freq", g.get("freq"))
-        upd_hist(hist, f"gpu_{g['id']}_mem_clock", g.get("mem_clock"))
-        upd_hist(hist, f"gpu_{g['id']}_fan", g.get("fan_rpm"))
+        gid = g['id']
+        upd_hist(hist, f"gpu_{gid}_power", g.get("power"))
+        # UPDATED: Now tracking Edge and Mem temps for session stats
+        upd_hist(hist, f"gpu_{gid}_temp_edge", g.get("temp_edge"))
+        upd_hist(hist, f"gpu_{gid}_temp_junction", g.get("temp_junction"))
+        upd_hist(hist, f"gpu_{gid}_temp_mem", g.get("temp_mem"))
+        upd_hist(hist, f"gpu_{gid}_voltage", g.get("voltage"))
+        upd_hist(hist, f"gpu_{gid}_freq", g.get("freq"))
+        upd_hist(hist, f"gpu_{gid}_mem_clock", g.get("mem_clock"))
+        upd_hist(hist, f"gpu_{gid}_fan", g.get("fan_rpm"))
     for f in stats.get("system_fans", []):
         upd_hist(hist, f"fan_{f['key']}_rpm", f.get("rpm"))
 
@@ -735,13 +725,13 @@ def log_stats(stats: Dict[str, Any], fan_names: Dict[str, str]) -> bool:
 # --------------------------------------------------------------------------- #
 C_NORMAL = 0
 C_HEADER = 1
-C_GOOD   = 2  # Cyan/Green for normal stats
-C_WARN   = 3  # Yellow
-C_CRIT   = 4  # Red
+C_GOOD   = 2
+C_WARN   = 3
+C_CRIT   = 4
 
 def init_colors():
     curses.start_color()
-    curses.use_default_colors() # Keeps background transparent/black
+    curses.use_default_colors()
     curses.init_pair(C_HEADER, curses.COLOR_WHITE, -1)
     curses.init_pair(C_GOOD, curses.COLOR_CYAN, -1)
     curses.init_pair(C_WARN, curses.COLOR_YELLOW, -1)
@@ -750,8 +740,8 @@ def init_colors():
 def get_temp_color(temp: Optional[float], is_junction: bool = False) -> int:
     if temp is None: return C_NORMAL
     if is_junction:
-        if temp >= 100.0: return C_CRIT   # Red at 100°C+ Junction
-        if temp >= 90.0: return C_WARN    # Yellow at 90°C+ Junction
+        if temp >= 100.0: return C_CRIT
+        if temp >= 90.0: return C_WARN
     else:
         if temp >= 90.0: return C_CRIT
         if temp >= 85.0: return C_WARN
@@ -800,7 +790,7 @@ def draw(scr, stats, hist, fan_names, fan_stats, msg, logging, interval, live_to
         write_line([(text, color)])
 
     write_plain("=" * 80, C_HEADER)
-    write_plain(" Real-time Hardware Telemetry & Fan Speed Monitor (v5.0)", C_HEADER)
+    write_plain(" Real-time Hardware Telemetry & Fan Speed Monitor (v5.1)", C_HEADER)
     write_plain("=" * 80, C_HEADER)
     write_plain("")
 
@@ -827,7 +817,12 @@ def draw(scr, stats, hist, fan_names, fan_stats, msg, logging, interval, live_to
     for g in stats.get("gpus", []):
         gid = g["id"]
         pmin, pmax, pavg = get_hist(hist, f"gpu_{gid}_power")
+        
+        # UPDATED: Fetching session stats for Edge, Junction, and Mem
+        te_min, te_max, te_avg = get_hist(hist, f"gpu_{gid}_temp_edge")
         tj_min, tj_max, tj_avg = get_hist(hist, f"gpu_{gid}_temp_junction")
+        tm_min, tm_max, tm_avg = get_hist(hist, f"gpu_{gid}_temp_mem")
+        
         vmin, vmax, varg = get_hist(hist, f"gpu_{gid}_voltage")
         fmin, fmax, favg = get_hist(hist, f"gpu_{gid}_freq")
         mmin, mmax, mavg = get_hist(hist, f"gpu_{gid}_mem_clock")
@@ -860,11 +855,15 @@ def draw(scr, stats, hist, fan_names, fan_stats, msg, logging, interval, live_to
         
         if g.get("temp_edge") is not None:
             write_line([("   • Edge Temp:      ", C_NORMAL), (f"{fmt_float(g.get('temp_edge'), '.1f')}°C", C_GOOD)])
+            write_plain(f"   • Edge Session:   {fmt_session(te_min, te_max, te_avg, '°C', 1)}") # ADDED
+            
         if t_junc is not None:
             write_line([("   • Junction Temp:  ", C_NORMAL), (f"{fmt_float(t_junc, '.1f')}°C", t_color), (f" {spark_junc}", t_color)])
             write_plain(f"   • Junc Session:   {fmt_session(tj_min, tj_max, tj_avg, '°C', 1)}")
+            
         if g.get("temp_mem") is not None:
             write_line([("   • Memory Temp:    ", C_NORMAL), (f"{fmt_float(g.get('temp_mem'), '.1f')}°C", C_GOOD)])
+            write_plain(f"   • Mem Session:    {fmt_session(tm_min, tm_max, tm_avg, '°C', 1)}") # ADDED
         
         write_plain(f"   • Core Frequency: {fmt_float(g.get('freq'))} MHz")
         write_plain(f"   • Core Freq Session: {fmt_session(fmin, fmax, favg, ' MHz', 2)}")
@@ -951,54 +950,44 @@ def fan_assign_screen(scr):
 
     while True:
         key = scr.getch()
-        if key == ord("q"):
-            break
+        if key == ord("q"): break
         if key == ord("d"):
-            scr.addstr(len(fan_assignments) + 2, 0,
-                       "Delete GPU # (or Enter to cancel): ".ljust(80))
+            scr.addstr(len(fan_assignments) + 2, 0, "Delete GPU # (or Enter to cancel): ".ljust(80))
             scr.refresh()
             curses.echo()
-            raw = scr.getstr(len(fan_assignments) + 2, 41, 10).decode("utf-8",
-                                                                    "replace").strip()
+            raw = scr.getstr(len(fan_assignments) + 2, 41, 10).decode("utf-8", "replace").strip()
             curses.noecho()
             if raw.isdigit():
                 sel = int(raw) - 1
                 if 0 <= sel < len(fan_assignments):
                     g = sorted(fan_assignments.keys())[sel]
                     del fan_assignments[g]
-                    scr.addstr(len(fan_assignments) + 3, 0,
-                               f"Removed assignment for GPU {g}".ljust(80))
+                    scr.addstr(len(fan_assignments) + 3, 0, f"Removed assignment for GPU {g}".ljust(80))
         if key == ord("e"):
-            scr.addstr(len(fan_assignments) + 2, 0,
-                       "Edit GPU # (or Enter to cancel): ".ljust(80))
+            scr.addstr(len(fan_assignments) + 2, 0, "Edit GPU # (or Enter to cancel): ".ljust(80))
             scr.refresh()
             curses.echo()
-            raw = scr.getstr(len(fan_assignments) + 2, 41, 10).decode("utf-8",
-                                                                    "replace").strip()
+            raw = scr.getstr(len(fan_assignments) + 2, 41, 10).decode("utf-8", "replace").strip()
             curses.noecho()
             if raw.isdigit():
                 sel = int(raw) - 1
                 if 0 <= sel < len(fan_assignments):
                     g = sorted(fan_assignments.keys())[sel]
-                    scr.addstr(len(fan_assignments) + 3, 0,
-                               f"New label for GPU {g}: ".ljust(80))
+                    scr.addstr(len(fan_assignments) + 3, 0, f"New label for GPU {g}: ".ljust(80))
                     scr.refresh()
                     curses.echo()
-                    new = scr.getstr(len(fan_assignments) + 4, 0, 30).decode("utf-8",
-                                                                            "replace").strip()
+                    new = scr.getstr(len(fan_assignments) + 4, 0, 30).decode("utf-8", "replace").strip()
                     curses.noecho()
                     if new:
                         fan_assignments[g] = new
-                        scr.addstr(len(fan_assignments) + 5, 0,
-                                   f"GPU {g} -> {new}".ljust(80))
+                        scr.addstr(len(fan_assignments) + 5, 0, f"GPU {g} -> {new}".ljust(80))
     scr.erase()
     scr.refresh()
 
 def prompt_interval(scr, current):
     scr.erase()
     scr.addstr(0, 0, f"Current interval: {current:.2f}s")
-    scr.addstr(1, 0,
-               "Enter new interval in seconds (Enter to cancel): ")
+    scr.addstr(1, 0, "Enter new interval in seconds (Enter to cancel): ")
     scr.refresh()
     curses.echo()
     curses.nodelay(False)
@@ -1007,21 +996,18 @@ def prompt_interval(scr, current):
     finally:
         curses.noecho()
         curses.nodelay(True)
-    if not raw:
-        return None
+    if not raw: return None
     try:
         val = float(raw)
     except ValueError:
         return None
-    if val < MIN_UPDATE_INTERVAL or val > MAX_UPDATE_INTERVAL:
-        return None
+    if val < MIN_UPDATE_INTERVAL or val > MAX_UPDATE_INTERVAL: return None
     return val
 
 def add_assignment(scr, hw, stats):
     global fan_names, fan_assignments
     scr.nodelay(False)
     curses.echo()
-
     scr.erase()
     scr.addstr(0, 0, "Assign fan to GPU")
     scr.refresh()
@@ -1031,92 +1017,62 @@ def add_assignment(scr, hw, stats):
         cur = fan_assignments.get(gpu_idx, "(unassigned)")
         scr.addstr(1 + i, 0, f"{i}. GPU {gpu_idx} ({info['name']}) => {cur}")
 
-    scr.addstr(len(gpu_list) + 2, 0,
-               "Select GPU # (or press Enter to cancel): ")
+    scr.addstr(len(gpu_list) + 2, 0, "Select GPU # (or press Enter to cancel): ")
     scr.refresh()
     raw = scr.getstr(len(gpu_list) + 2, 45, 10).decode("utf-8", "replace").strip()
     if not raw:
-        scr.nodelay(True)
-        curses.noecho()
-        return
-
+        scr.nodelay(True); curses.noecho(); return
     if not raw.isdigit():
         scr.addstr(len(gpu_list) + 3, 0, "Invalid number".ljust(80))
-        scr.refresh()
-        time.sleep(1.5)
-        scr.nodelay(True)
-        curses.noecho()
-        return
+        scr.refresh(); time.sleep(1.5)
+        scr.nodelay(True); curses.noecho(); return
 
     sel = int(raw) - 1
     if sel < 0 or sel >= len(gpu_list):
-        scr.nodelay(True)
-        curses.noecho()
-        return
+        scr.nodelay(True); curses.noecho(); return
 
     gpu_idx, info = gpu_list[sel]
-
     fan_list = stats.get("system_fans", [])
     if not fan_list:
-        scr.addstr(len(gpu_list) + 3, 0,
-                   "No system fans detected".ljust(80))
-        scr.refresh()
-        time.sleep(1.5)
-        scr.nodelay(True)
-        curses.noecho()
-        return
+        scr.addstr(len(gpu_list) + 3, 0, "No system fans detected".ljust(80))
+        scr.refresh(); time.sleep(1.5)
+        scr.nodelay(True); curses.noecho(); return
 
     scr.erase()
-    scr.addstr(0, 0,
-               f"Assign fan to GPU {gpu_idx} ({info['name']})")
+    scr.addstr(0, 0, f"Assign fan to GPU {gpu_idx} ({info['name']})")
     for i, fan in enumerate(fan_list, start=1):
         name = fan_display_name(fan, fan_names)
-        scr.addstr(1 + i, 0,
-                   f"{i}. {name} ({fan['rpm']} RPM)")
+        scr.addstr(1 + i, 0, f"{i}. {name} ({fan['rpm']} RPM)")
 
-    scr.addstr(len(fan_list) + 2, 0,
-               "Select fan # (or press Enter to cancel): ")
+    scr.addstr(len(fan_list) + 2, 0, "Select fan # (or press Enter to cancel): ")
     scr.refresh()
-    raw = scr.getstr(len(fan_list) + 2, 45, 10).decode("utf-8",
-                                                      "replace").strip()
+    raw = scr.getstr(len(fan_list) + 2, 45, 10).decode("utf-8", "replace").strip()
     if not raw:
-        scr.nodelay(True)
-        curses.noecho()
-        return
-
+        scr.nodelay(True); curses.noecho(); return
     if not raw.isdigit():
         scr.addstr(len(fan_list) + 3, 0, "Invalid number".ljust(80))
-        scr.refresh()
-        time.sleep(1.5)
-        scr.nodelay(True)
-        curses.noecho()
-        return
+        scr.refresh(); time.sleep(1.5)
+        scr.nodelay(True); curses.noecho(); return
 
     sel_fan = int(raw) - 1
     if sel_fan < 0 or sel_fan >= len(fan_list):
-        scr.nodelay(True)
-        curses.noecho()
-        return
+        scr.nodelay(True); curses.noecho(); return
 
     fan = fan_list[sel_fan]
-
     fan_assignments[gpu_idx] = fan["key"]
 
     scr.erase()
     name = fan_display_name(fan, fan_names)
-    scr.addstr(0, 0,
-               f"Assigned fan '{name}' (key={fan['key']}) to GPU {gpu_idx}.")
+    scr.addstr(0, 0, f"Assigned fan '{name}' (key={fan['key']}) to GPU {gpu_idx}.")
     scr.addstr(1, 0, "Press any key to return.")
     scr.refresh()
     scr.getch()
-
     scr.nodelay(True)
     curses.noecho()
 
 def rename_fan(scr, stats, fan_names):
     fans = stats.get("system_fans", [])
-    if not fans:
-        return "No fans to rename."
+    if not fans: return "No fans to rename."
     scr.erase()
     scr.addstr(0, 0, "Select fan to rename")
     for i, f in enumerate(fans, 1):
@@ -1125,22 +1081,17 @@ def rename_fan(scr, stats, fan_names):
     scr.addstr(len(fans) + 2, 0, "Fan # (or press Enter to cancel): ")
     scr.refresh()
     curses.echo()
-    raw = scr.getstr(len(fans) + 2, 45, 10).decode("utf-8",
-                                                    "replace").strip()
+    raw = scr.getstr(len(fans) + 2, 45, 10).decode("utf-8", "replace").strip()
     curses.noecho()
-    if not raw:
-        return "Rename cancelled."
-    if not raw.isdigit():
-        return "Invalid number."
+    if not raw: return "Rename cancelled."
+    if not raw.isdigit(): return "Invalid number."
     sel = int(raw) - 1
     if 0 <= sel < len(fans):
         fan = fans[sel]
-        scr.addstr(len(fans) + 3, 0,
-                   f"New name for fan {fan['key']}: ".ljust(80))
+        scr.addstr(len(fans) + 3, 0, f"New name for fan {fan['key']}: ".ljust(80))
         scr.refresh()
         curses.echo()
-        new = scr.getstr(len(fans) + 4, 0, 30).decode("utf-8",
-                                                    "replace").strip()
+        new = scr.getstr(len(fans) + 4, 0, 30).decode("utf-8", "replace").strip()
         curses.noecho()
         if new:
             fan_names[fan["key"]] = new
@@ -1221,11 +1172,9 @@ def main_loop(scr):
         total_power = 0.0
         if cpu and cpu.get("power") is not None:
             total_power += cpu.get("power")
-            
         for g in stats.get("gpus", []):
             if g.get("power") is not None:
                 total_power += g.get("power")
-                
         total_power += sum(f["power"] for f in fan_stats.values())
         
         upd_hist(hist, "total_power", total_power)
@@ -1234,8 +1183,7 @@ def main_loop(scr):
         if logging:
             log_stats(stats, fan_names)
 
-        draw(scr, stats, hist, fan_names, fan_stats,
-             message, logging, interval, total_power, rolling_data)
+        draw(scr, stats, hist, fan_names, fan_stats, message, logging, interval, total_power, rolling_data)
 
         try:
             key = scr.getch()
@@ -1244,34 +1192,25 @@ def main_loop(scr):
 
         if key in (ord("q"), ord("Q")):
             break
-
         if key in (ord("r"), ord("R")):
             hist, prev_energy, prev_time = reset_stats()
             rolling_data.clear()
             message = "All statistics reset."
-
         if key in (ord("n"), ord("N")):
             message = rename_fan(scr, stats, fan_names)
-
         if key in (ord("s"), ord("S")):
             ns = save_fan_names(fan_names)
             cs = save_config(interval, logging)
             as_ = save_fan_assignments(fan_assignments)
-            if ns and cs and as_:
-                message = "Names, settings, and assignments saved."
-            else:
-                message = "Failed to save something."
-
+            message = "Names, settings, and assignments saved." if ns and cs and as_ else "Failed to save something."
         if key in (ord("l"), ord("L")):
             logging = not logging
             message = "Logging enabled." if logging else "Logging disabled."
-
         if key in (ord("i"), ord("I")):
             new_int = prompt_interval(scr, interval)
             if new_int is not None:
                 interval = new_int
                 message = f"Interval set to {interval:.2f}s"
-
         if key in (ord("a"), ord("A")):
             add_assignment(scr, hw, stats)
 
@@ -1281,13 +1220,9 @@ def main_loop(scr):
         except KeyboardInterrupt:
             break
 
-    # cleanup
     save_fan_names(fan_names)
     save_config(interval, logging)
     save_fan_assignments(fan_assignments)
 
-# --------------------------------------------------------------------------- #
-# Entrypoint
-# --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     curses.wrapper(main_loop)
